@@ -1,69 +1,68 @@
 {
-  "version": "1.1.0",
+  "version": "2.0",
   "items": [
     {
       "id": "glasses_01",
       "category": "glasses",
-      "name": "Stylized Eyeglasses Set",
+      "name": "Stylized Eyeglasses",
       "modelUrl": "assets/models/glasses/glasses_01.glb",
       "thumbnail": null,
-      "isNew": true
+      "isNew": true,
+      "description": "Futuristic stylized eyeglasses"
     },
     {
       "id": "glasses_02",
       "category": "glasses",
-      "name": "Classic Oval (3D)",
+      "name": "Classic Oval",
       "modelUrl": "assets/models/glasses/glasses_02.glb",
       "thumbnail": null,
-      "isNew": false
+      "isNew": false,
+      "description": "Classic oval frame glasses"
     },
     {
       "id": "glasses_03",
       "category": "glasses",
-      "name": "Aviator Gold (3D)",
+      "name": "Aviator Gold",
       "modelUrl": "assets/models/glasses/glasses_03.glb",
       "thumbnail": null,
-      "isNew": false
+      "isNew": false,
+      "description": "Gold aviator frame"
+    },
+    {
+      "id": "glasses_04",
+      "category": "glasses",
+      "name": "Wayfarer Black",
+      "modelUrl": "assets/models/glasses/glasses_04.glb",
+      "thumbnail": null,
+      "isNew": false,
+      "description": "Classic wayfarer style"
     },
     {
       "id": "shirt_01",
       "category": "shirt",
-      "name": "Stylized Hoodie Jacket",
+      "name": "Stylized Hoodie",
       "modelUrl": "assets/models/shirts/shirt_01.glb",
       "thumbnail": null,
-      "isNew": true
+      "isNew": true,
+      "description": "Stylized hoodie jacket"
     },
     {
       "id": "shirt_02",
       "category": "shirt",
-      "name": "XD Full Outfit Hoodie",
+      "name": "Full Outfit XD",
       "modelUrl": "assets/models/shirts/shirt_02.glb",
       "thumbnail": null,
-      "isNew": true
+      "isNew": true,
+      "description": "Full body outfit"
     },
     {
       "id": "shirt_03",
       "category": "shirt",
-      "name": "Navy Casual",
+      "name": "Casual Jacket",
       "modelUrl": "assets/models/shirts/shirt_03.glb",
       "thumbnail": null,
-      "isNew": false
-    },
-    {
-      "id": "hat_01",
-      "category": "hat",
-      "name": "Black Cap",
-      "modelUrl": "assets/models/hats/hat_01.glb",
-      "thumbnail": null,
-      "isNew": false
-    },
-    {
-      "id": "watch_01",
-      "category": "watch",
-      "name": "Silver Sport",
-      "modelUrl": "assets/models/watches/watch_01.glb",
-      "thumbnail": null,
-      "isNew": false
+      "isNew": false,
+      "description": "Casual street jacket"
     }
   ]
 }

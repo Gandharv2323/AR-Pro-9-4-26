@@ -1,14 +1,15 @@
 /**
- * renderer-3d.js
- * Three.js scene manager for 3D GLB asset rendering.
+ * renderer-3d.js  — v2
+ * Three.js scene manager for 3D GLB asset overlay.
  *
- * Responsibilities:
- *   - Transparent WebGL canvas overlaid on webcam video
- *   - Load .glb garments via GLTFLoader
- *   - Position + orient glasses at head pose
- *   - Apply gesture-driven scale / position / rotation offsets
- *   - PBR lighting (ambient + directional + env map)
- *   - Fallback: procedural Three.js geometry if no GLB provided
+ * FIXES v2:
+ *   - Auto-normalize: fit any GLB to a canonical bounding box on load
+ *   - Scale formula corrected — models now visible at normal camera distance
+ *   - Mirror correction: model X is flipped to match mirrored video
+ *   - GLB not found → elegant fallback procedural geometry (no crash)
+ *   - Preload: preloadModels() to warm up cache
+ *   - PBR setup: traverse + envMapIntensity on all mesh materials
+ *   - dispose() properly clears cache
  */
 
 import * as THREE from 'three';
@@ -18,57 +19,104 @@ import { estimateHeadPose, normToWorld } from './head-pose.js';
 
 const DRACO_CDN = 'https://www.gstatic.com/draco/versioned/decoders/1.5.7/';
 
+// Category-specific tuning
+const CAT_CONFIG = {
+  glasses: { yOff:  0.01, targetWidth: 0.18, depth: -1.8 },
+  hat:     { yOff:  0.25, targetWidth: 0.30, depth: -1.8 },
+  shirt:   { yOff: -0.55, targetWidth: 0.60, depth: -2.0 },
+  watch:   { yOff:  0.0,  targetWidth: 0.12, depth: -1.8 },
+  bag:     { yOff: -0.3,  targetWidth: 0.40, depth: -2.0 },
+};
+
 export class Renderer3D {
-  /**
-   * @param {HTMLCanvasElement} canvas  — the transparent overlay canvas
-   */
+  /** @param {HTMLCanvasElement} canvas */
   constructor(canvas) {
     this._canvas = canvas;
-    this._w = canvas.width;
-    this._h = canvas.height;
+    this._w = canvas.width  || window.innerWidth;
+    this._h = canvas.height || window.innerHeight;
 
-    // Three.js core
+    // WebGL renderer — transparent background
     this._renderer = new THREE.WebGLRenderer({
       canvas,
-      alpha: true,
-      antialias: true,
+      alpha:              true,
+      antialias:          true,
       premultipliedAlpha: false,
+      powerPreference:    'high-performance',
     });
-    this._renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    this._renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
     this._renderer.setSize(this._w, this._h);
-    this._renderer.setClearColor(0x000000, 0);  // fully transparent
-    this._renderer.shadowMap.enabled = true;
-    this._renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    this._renderer.setClearColor(0x000000, 0);
+    this._renderer.shadowMap.enabled  = false;   // perf: disabled
+    this._renderer.toneMapping        = THREE.ACESFilmicToneMapping;
     this._renderer.toneMappingExposure = 1.2;
 
-    // Camera — FOV 60° matching typical webcam
-    this._camera = new THREE.PerspectiveCamera(60, this._w / this._h, 0.01, 100);
+    // Camera — 60° vertical FOV matching typical frontal webcam
+    this._camera = new THREE.PerspectiveCamera(60, this._w / this._h, 0.001, 50);
     this._camera.position.set(0, 0, 0);
     this._camera.lookAt(0, 0, -1);
 
-    // Scene + lighting
     this._scene = new THREE.Scene();
     this._setupLights();
 
-    // GLTF + DRACO loaders
+    // Loaders
     const draco = new DRACOLoader();
     draco.setDecoderPath(DRACO_CDN);
     this._loader = new GLTFLoader();
     this._loader.setDRACOLoader(draco);
 
-    // Loaded models cache — key: url → THREE.Group
-    this._modelCache = new Map();
+    // Cache: url → { group, normalizedScale }
+    this._cache = new Map();
 
-    // Currently active mesh shown in scene
-    this._activeGroup = null;
+    // Active model in scene
+    this._active = null;
+    this._activeCategory = 'glasses';
 
-    // Gesture-driven transform offsets (applied on top of face pose)
+    // Gesture offsets applied on top of face pose
     this.gestureOffset = { x: 0, y: 0, z: 0 };
     this.gestureScale  = 1.0;
-    this.gestureRotY   = 0;   // radians (two-hand rotate)
+    this.gestureRotY   = 0;
 
-    // Procedural fallback geometry per category
-    this._fallbackCache = new Map();
+    // Fallback geometry cache
+    this._fallbacks = new Map();
+
+    // Pre-create env map (grey gradient — fast, no image needed)
+    this._setupEnvMap();
+  }
+
+  // ── Lights ─────────────────────────────────────────────────────────────────
+  _setupLights() {
+    // Ambient
+    this._scene.add(new THREE.AmbientLight(0xffffff, 1.2));
+
+    // Key — upper right (ring-light style for selfie)
+    const key = new THREE.DirectionalLight(0xfff5ee, 2.5);
+    key.position.set(1.5, 3, 3);
+    this._scene.add(key);
+
+    // Fill — soft left
+    const fill = new THREE.DirectionalLight(0xd0e8ff, 1.0);
+    fill.position.set(-2, 1, 2);
+    this._scene.add(fill);
+
+    // Rim — blue tint from behind, makes metallic glasses pop
+    const rim = new THREE.DirectionalLight(0x7ec8ff, 0.8);
+    rim.position.set(0, -2, -3);
+    this._scene.add(rim);
+  }
+
+  // ── Env map for PBR reflections ───────────────────────────────────────────
+  _setupEnvMap() {
+    // 4-pixel procedural "studio" environment
+    const data = new Uint8Array([
+      180, 195, 210, 255,   // top-left  light grey-blue
+      210, 215, 220, 255,   // top-right lighter
+      100, 110, 120, 255,   // bot-left  dark
+      130, 140, 150, 255,   // bot-right mid
+    ]);
+    const tex = new THREE.DataTexture(data, 2, 2, THREE.RGBAFormat);
+    tex.mapping = THREE.EquirectangularReflectionMapping;
+    tex.needsUpdate = true;
+    this._scene.environment = tex;
   }
 
   // ── Resize ─────────────────────────────────────────────────────────────────
@@ -79,190 +127,196 @@ export class Renderer3D {
     this._camera.updateProjectionMatrix();
   }
 
-  // ── Lighting ───────────────────────────────────────────────────────────────
-  _setupLights() {
-    // Key light (from upper-right, simulates selfie ring light)
-    const key = new THREE.DirectionalLight(0xffffff, 2.0);
-    key.position.set(1, 2, 2);
-    this._scene.add(key);
-
-    // Fill light (from left, softer)
-    const fill = new THREE.DirectionalLight(0xccddff, 0.8);
-    fill.position.set(-1, 0.5, 1);
-    this._scene.add(fill);
-
-    // Ambient for PBR base
-    this._scene.add(new THREE.AmbientLight(0xffffff, 0.6));
-
-    // Back light (rim effect — makes glasses "pop")
-    const rim = new THREE.DirectionalLight(0x00d4ff, 0.5);
-    rim.position.set(0, -1, -2);
-    this._scene.add(rim);
-  }
-
-  // ── Model Loading ──────────────────────────────────────────────────────────
+  // ── Model loading ──────────────────────────────────────────────────────────
   /**
-   * Load a .glb model and cache it. Returns a cloned Three.Group.
+   * Load a .glb, auto-normalize its scale, cache and return a clone.
    * @param {string} url
    * @returns {Promise<THREE.Group>}
    */
   async loadModel(url) {
-    if (this._modelCache.has(url)) {
-      return this._modelCache.get(url).clone();
+    if (this._cache.has(url)) {
+      return this._cache.get(url).clone(true);
     }
     return new Promise((resolve, reject) => {
-      this._loader.load(
-        url,
-        (gltf) => {
-          const group = gltf.scene;
-          // Ensure PBR materials are set up
-          group.traverse(obj => {
-            if (obj.isMesh) {
-              obj.castShadow = false;
-              obj.receiveShadow = false;
-              if (obj.material) {
-                // Enhance metallic materials
-                if (obj.material.metalness !== undefined) {
-                  obj.material.envMapIntensity = 1.5;
-                }
-              }
+      this._loader.load(url, (gltf) => {
+        const group = gltf.scene;
+
+        // ── Normalize to unit bounding box ────────────────────────────────
+        const box = new THREE.Box3().setFromObject(group);
+        const size = new THREE.Vector3();
+        box.getSize(size);
+        const maxDim = Math.max(size.x, size.y, size.z);
+        if (maxDim > 0) group.scale.setScalar(1 / maxDim);
+
+        // Centre pivot at origin
+        const centre = new THREE.Vector3();
+        box.getCenter(centre);
+        group.position.sub(centre.multiplyScalar(1 / maxDim));
+
+        // Enhance materials
+        group.traverse(obj => {
+          if (!obj.isMesh) return;
+          const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
+          mats.forEach(m => {
+            if (!m) return;
+            if (m.metalness !== undefined) {
+              m.metalness = Math.max(m.metalness, 0.3);
+              m.envMapIntensity = 1.8;
             }
+            m.needsUpdate = true;
           });
-          this._modelCache.set(url, group);
-          resolve(group.clone());
-        },
-        undefined,
-        reject
-      );
+        });
+
+        this._cache.set(url, group);
+        resolve(group.clone(true));
+
+      }, undefined, (err) => {
+        console.warn('[Renderer3D] loadModel failed:', url, err.message ?? err);
+        reject(err);
+      });
     });
   }
 
   /**
-   * Set the active 3D model to show.
-   * @param {THREE.Group|null} group
+   * Preload a list of model URLs into cache (fire-and-forget).
+   * @param {string[]} urls
    */
-  setActiveModel(group) {
-    if (this._activeGroup) {
-      this._scene.remove(this._activeGroup);
-    }
-    this._activeGroup = group;
-    if (group) {
-      this._scene.add(group);
+  preloadModels(urls) {
+    for (const url of urls) {
+      if (!this._cache.has(url)) {
+        this.loadModel(url).catch(() => {});  // silently cache; failure = fallback
+      }
     }
   }
 
   /**
-   * Get or create a procedural fallback mesh for a category.
-   * Used when no .glb is available.
-   * @param {'glasses'|'shirt'|'hat'|'watch'|'bag'} category
+   * Set the active group to display. Replaces previous.
+   * @param {THREE.Group|null} group
+   * @param {string} category
+   */
+  setActiveModel(group, category = 'glasses') {
+    if (this._active) this._scene.remove(this._active);
+    this._active = group;
+    this._activeCategory = category;
+    if (group) this._scene.add(group);
+  }
+
+  /**
+   * Procedural fallback geometry when .glb is unavailable.
+   * @param {'glasses'|'hat'|'shirt'|'watch'|'bag'} category
    * @returns {THREE.Group}
    */
   getFallbackMesh(category) {
-    if (this._fallbackCache.has(category)) {
-      return this._fallbackCache.get(category).clone();
-    }
+    if (this._fallbacks.has(category)) return this._fallbacks.get(category).clone(true);
+
     const group = new THREE.Group();
-    const mat = new THREE.MeshStandardMaterial({
-      color: 0x222222, metalness: 0.9, roughness: 0.1,
-    });
 
     if (category === 'glasses') {
-      // Torus rims
-      const rimGeo = new THREE.TorusGeometry(0.07, 0.012, 12, 48);
-      const lRim = new THREE.Mesh(rimGeo, mat); lRim.position.x = -0.10;
-      const rRim = new THREE.Mesh(rimGeo, mat); rRim.position.x =  0.10;
+      const metalMat = new THREE.MeshStandardMaterial({
+        color: 0x1a1a2e, metalness: 0.95, roughness: 0.08,
+        envMapIntensity: 2.0,
+      });
+      const glassMat = new THREE.MeshStandardMaterial({
+        color: 0x88ccff, metalness: 0, roughness: 0,
+        transparent: true, opacity: 0.25,
+      });
+
+      // Lenses
+      [-0.35, 0.35].forEach(xPos => {
+        const lens = new THREE.Mesh(
+          new THREE.TorusGeometry(0.20, 0.03, 16, 60), metalMat
+        );
+        lens.position.x = xPos;
+        group.add(lens);
+
+        // Glass fill
+        const fill = new THREE.Mesh(
+          new THREE.CircleGeometry(0.19, 32), glassMat
+        );
+        fill.position.x = xPos;
+        fill.position.z = 0.01;
+        group.add(fill);
+      });
+
       // Bridge
-      const bridgeGeo = new THREE.CylinderGeometry(0.007, 0.007, 0.06, 8);
-      const bridge = new THREE.Mesh(bridgeGeo, mat);
+      const bridge = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.018, 0.018, 0.16, 8), metalMat
+      );
       bridge.rotation.z = Math.PI / 2;
+      group.add(bridge);
+
       // Arms
-      const armGeo = new THREE.CylinderGeometry(0.005, 0.004, 0.30, 8);
-      const lArm = new THREE.Mesh(armGeo, mat);
-      lArm.position.set(-0.22, 0, -0.07);
-      lArm.rotation.y =  0.4;
-      const rArm = new THREE.Mesh(armGeo, mat);
-      rArm.position.set( 0.22, 0, -0.07);
-      rArm.rotation.y = -0.4;
-      group.add(lRim, rRim, bridge, lArm, rArm);
+      [-1, 1].forEach(side => {
+        const arm = new THREE.Mesh(
+          new THREE.CylinderGeometry(0.012, 0.009, 0.72, 8), metalMat
+        );
+        arm.position.x = side * 0.52;
+        arm.position.z = -0.18;
+        arm.rotation.y = side * 0.35;
+        arm.rotation.z = Math.PI / 2;
+        group.add(arm);
+      });
 
     } else if (category === 'hat') {
-      const brimGeo = new THREE.CylinderGeometry(0.22, 0.22, 0.02, 32);
-      const crownGeo = new THREE.CylinderGeometry(0.14, 0.15, 0.20, 32);
-      const bMat = new THREE.MeshStandardMaterial({ color: 0x1a1a2e, roughness: 0.8 });
-      group.add(new THREE.Mesh(brimGeo, bMat));
-      const crown = new THREE.Mesh(crownGeo, bMat);
-      crown.position.y = 0.11;
-      group.add(crown);
+      const mat = new THREE.MeshStandardMaterial({ color: 0x0d0d0d, roughness: 0.85 });
+      const brim  = new THREE.Mesh(new THREE.CylinderGeometry(0.60, 0.62, 0.05, 32), mat);
+      const crown = new THREE.Mesh(new THREE.CylinderGeometry(0.38, 0.40, 0.52, 32), mat);
+      crown.position.y = 0.28; group.add(brim, crown);
 
     } else {
-      // Generic placeholder — glowing box
-      const geo = new THREE.BoxGeometry(0.2, 0.2, 0.05);
-      const m = new THREE.MeshStandardMaterial({ color: 0x9d4edd, roughness: 0.3, metalness: 0.5 });
-      group.add(new THREE.Mesh(geo, m));
+      // Generic coloured cube
+      const mat = new THREE.MeshStandardMaterial({
+        color: 0x9d4edd, metalness: 0.6, roughness: 0.3,
+      });
+      group.add(new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.6, 0.1), mat));
     }
 
-    this._fallbackCache.set(category, group);
-    return group.clone();
+    this._fallbacks.set(category, group);
+    return group.clone(true);
   }
 
   // ── Per-frame update ───────────────────────────────────────────────────────
   /**
-   * Update 3D overlay position/rotation based on face + gesture state.
-   *
-   * @param {Array<{x,y,z}>|null} faceLms     — 478 MediaPipe face landmarks
-   * @param {Array<{x,y,z}>|null} poseLms     — 33 MediaPipe pose landmarks
-   * @param {'glasses'|'shirt'|'hat'|'watch'|'bag'} category
+   * Update 3D model transform from face/pose landmarks + gesture offsets.
+   * @param {Array<{x,y,z}>|null} faceLms
+   * @param {Array<{x,y,z}>|null} _poseLms   (reserved — shirt body anchor)
+   * @param {string}              category
    */
-  update(faceLms, poseLms, category) {
-    if (!this._activeGroup) return;
+  update(faceLms, _poseLms, category) {
+    if (!this._active) return;
 
     const pose = estimateHeadPose(faceLms, this._w);
 
     if (!pose) {
-      // No face — hide model
-      this._activeGroup.visible = false;
+      // No face — keep showing last known position (don't flicker off)
       return;
     }
 
-    this._activeGroup.visible = true;
+    const cfg = CAT_CONFIG[category] ?? CAT_CONFIG.glasses;
 
-    // ── Position ───────────────────────────────────────────────────────────
-    let anchorNorm;
-    if (category === 'glasses' || category === 'hat') {
-      anchorNorm = pose.bridgePos;
-    } else {
-      anchorNorm = pose.faceCenter;
-    }
+    // Anchor landmark
+    const anchor = (category === 'hat') ? pose.eyeMid : pose.bridgePos;
 
-    const worldPos = normToWorld(
-      anchorNorm,
-      pose.scale,
-      this._camera.fov,
-      this._camera.aspect,
-      -2.0
+    // Convert to world space
+    const wp = normToWorld(anchor, pose.scale, this._camera.fov, this._camera.aspect, cfg.depth);
+
+    // Apply gesture + category offsets
+    this._active.position.set(
+      wp.x + this.gestureOffset.x,
+      wp.y + cfg.yOff + this.gestureOffset.y,
+      wp.z + this.gestureOffset.z
     );
 
-    // Category-specific Y offset
-    const yOffsets = { glasses: 0.02, hat: 0.35, shirt: 1.0 };
-    const yOff = yOffsets[category] ?? 0;
+    // Rotation — face pose + user rotate gesture
+    this._active.rotation.set(pose.pitch * 0.8, pose.yaw + this.gestureRotY, pose.roll);
 
-    this._activeGroup.position.set(
-      worldPos.x + this.gestureOffset.x,
-      worldPos.y + yOff + this.gestureOffset.y,
-      worldPos.z + this.gestureOffset.z
-    );
-
-    // ── Rotation ─────────────────────────────────────────────────────────
-    this._activeGroup.rotation.set(
-      pose.pitch,
-      pose.yaw  + this.gestureRotY,
-      pose.roll
-    );
-
-    // ── Scale ─────────────────────────────────────────────────────────────
-    const baseScale = pose.scale * 0.20;  // tune for model size
-    const s = baseScale * this.gestureScale;
-    this._activeGroup.scale.setScalar(s);
+    // Scale = (canonical size / 1.0 after normalization) × face scale × gesture
+    // After normalization, model is 1 unit wide. We want targetWidth in world space.
+    const worldHeight = 2 * Math.abs(cfg.depth) * Math.tan((this._camera.fov * Math.PI / 180) / 2);
+    const worldWidth  = worldHeight * this._camera.aspect;
+    const targetWorldUnits = (cfg.targetWidth / worldWidth) * worldWidth; // = targetWidth directly
+    const s = targetWorldUnits * pose.scale * this.gestureScale;
+    this._active.scale.setScalar(Math.max(0.001, s));
   }
 
   // ── Render ─────────────────────────────────────────────────────────────────
@@ -272,14 +326,13 @@ export class Renderer3D {
 
   // ── Cleanup ────────────────────────────────────────────────────────────────
   dispose() {
-    this._renderer.dispose();
-    this._modelCache.forEach(g => g.traverse(o => {
-      if (o.isMesh) { o.geometry.dispose(); }
-      if (o.material) {
-        if (Array.isArray(o.material)) o.material.forEach(m => m.dispose());
-        else o.material.dispose();
-      }
+    this._cache.forEach(g => g.traverse(o => {
+      if (!o.isMesh) return;
+      o.geometry?.dispose();
+      const mats = Array.isArray(o.material) ? o.material : [o.material];
+      mats.forEach(m => m?.dispose());
     }));
-    this._modelCache.clear();
+    this._cache.clear();
+    this._renderer.dispose();
   }
 }

@@ -57,7 +57,7 @@ export class HUD {
     if (this._itemNameEl) this._itemNameEl.textContent = name;
   }
 
-  /** Flash gesture notification banner for 1.5s */
+  /** Flash gesture notification banner for 1.5s with re-triggered slide-up animation */
   showGesture(type) {
     const ICONS = {
       'tap':         ['🤏', 'Tap',        '#00d4ff'],
@@ -78,13 +78,18 @@ export class HUD {
       this._gestureLabel.textContent = label;
       this._gestureLabel.style.color = color;
     }
-    this._gestureEl.style.borderColor = color + '55';
-    this._gestureEl.classList.remove('hidden');
+    this._gestureEl.style.borderColor = `${color}55`;
+
+    // Re-trigger slide-up animation every call
+    this._gestureEl.classList.remove('hidden', 'show');
+    void this._gestureEl.offsetWidth;  // force reflow
+    this._gestureEl.classList.add('show');
 
     clearTimeout(this._gestureTimer);
     this._gestureTimer = setTimeout(() => {
       this._gestureEl?.classList.add('hidden');
-    }, 1500);
+      this._gestureEl?.classList.remove('show');
+    }, 1600);
   }
 }
 

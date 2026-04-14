@@ -31,7 +31,8 @@ html, body {
   color: var(--text-primary);
 }
 
-.hidden { opacity: 0 !important; pointer-events: none !important; }
+/* Generic hidden — opacity fade + no interaction */
+.hidden { opacity: 0 !important; pointer-events: none !important; transition: opacity 0.2s; }
 
 /* ── Canvas Stack ─────────────────────────────────────── */
 #webcam {
@@ -47,6 +48,7 @@ html, body {
   width: 100%; height: 100%;
   z-index: 2;
   pointer-events: none;
+  will-change: transform;   /* GPU compositing layer */
 }
 
 #canvasUI {
@@ -54,6 +56,7 @@ html, body {
   width: 100%; height: 100%;
   z-index: 3;
   pointer-events: none;
+  will-change: transform;
 }
 
 /* ── Splash ───────────────────────────────────────────── */
@@ -149,15 +152,18 @@ html, body {
   z-index: 20;
   display: flex; align-items: center; gap: 10px;
   padding: 10px 20px;
-  background: var(--glass-bg);
-  border: 1px solid var(--glass-border);
-  backdrop-filter: var(--blur);
+  background: rgba(8, 8, 18, 0.85);
+  border: 1px solid rgba(0, 212, 255, 0.3);
+  backdrop-filter: blur(20px);
   border-radius: 50px;
-  transition: opacity 0.3s ease;
-  animation: slide-up 0.3s ease;
+  /* No animation here — slide-up added dynamically per show */
+  transition: opacity 0.3s ease, border-color 0.3s;
+}
+.gesture-indicator.show {
+  animation: slide-up 0.3s ease forwards;
 }
 @keyframes slide-up {
-  from { transform: translateX(-50%) translateY(20px); opacity: 0; }
+  from { transform: translateX(-50%) translateY(16px); opacity: 0; }
   to   { transform: translateX(-50%) translateY(0);    opacity: 1; }
 }
 .gesture-icon { font-size: 22px; }
@@ -180,17 +186,26 @@ html, body {
   position: fixed; top: 0; right: 0; bottom: 0;
   z-index: 30;
   width: min(380px, 90vw);
-  background: rgba(8, 8, 18, 0.92);
-  backdrop-filter: blur(30px);
+  background: rgba(8, 8, 18, 0.95);
+  backdrop-filter: blur(30px) saturate(180%);
   border-left: 1px solid var(--glass-border);
   display: flex; flex-direction: column;
-  transform: translateX(100%);
-  transition: transform 0.4s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.4s;
+  /* Start off-screen — transition handles slide */
+  transform: translateX(110%);
+  transition: transform 0.4s cubic-bezier(0.4, 0, 0.2, 1);
   overflow: hidden;
+  will-change: transform;
+  /* Override .hidden which uses opacity; catalogue uses transform instead */
+  opacity: 1 !important;
+}
+/* When .hidden class is set via JS, hide using transform not opacity */
+.catalogue.hidden {
+  transform: translateX(110%) !important;
+  pointer-events: none !important;
+  opacity: 1 !important;    /* keep layout, move off-screen */
 }
 .catalogue.open {
-  transform: translateX(0);
-  opacity: 1 !important;
+  transform: translateX(0) !important;
   pointer-events: all !important;
 }
 
@@ -334,6 +349,34 @@ html, body {
   animation: ripple-out 0.6s ease forwards;
 }
 @keyframes ripple-out {
-  0%   { width: 0; height: 0; opacity: 0.9; transform: translate(-50%,-50%) scale(1); }
-  100% { width: 80px; height: 80px; opacity: 0; transform: translate(-50%,-50%) scale(1); }
+  0%   { width: 0; height: 0; opacity: 0.9; transform: translate(-50%,-50%); }
+  100% { width: 80px; height: 80px; opacity: 0; transform: translate(-50%,-50%); }
+}
+
+/* ── Model loading pulse ─────────────────────────────── */
+.model-loading #canvas3d {
+  animation: canvas-pulse 0.6s ease-in-out 2;
+}
+@keyframes canvas-pulse {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.6; }
+}
+
+/* ── Tooltip for HUD dots ────────────────────────────── */
+.hud-dot { cursor: default; }
+
+/* ── Keyboard shortcut hint ──────────────────────────── */
+.keyboard-hints {
+  position: fixed; bottom: 50px; right: 24px;
+  z-index: 20; font-size: 11px; color: var(--text-muted);
+  display: flex; flex-direction: column; gap: 4px;
+  text-align: right;
+  opacity: 0; transition: opacity 0.3s;
+}
+.keyboard-hints:hover { opacity: 1; }
+
+/* ── Focus styles for accessibility ─────────────────── */
+button:focus-visible {
+  outline: 2px solid var(--cyan);
+  outline-offset: 2px;
 }
