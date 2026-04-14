@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Zyro AR — Smart Mirror</title>
+  <meta name="description" content="Real-time AR virtual try-on with Apple Vision Pro gestures" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="style.css" />
+
+  <!-- Import map: Three.js + MediaPipe from CDN, zero build step -->
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.168.0/build/three.module.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.168.0/examples/jsm/"
+    }
+  }
+  </script>
+</head>
+<body>
+
+  <!-- ═══════════════ SPLASH SCREEN ═══════════════ -->
+  <div id="splash" class="splash">
+    <div class="splash-content">
+      <div class="splash-logo">
+        <span class="logo-zyro">ZYRO</span>
+        <span class="logo-ar">AR</span>
+      </div>
+      <p class="splash-tagline">Virtual Try-On · Powered by AI</p>
+      <div class="splash-progress">
+        <div class="splash-bar" id="splashBar"></div>
+      </div>
+      <p class="splash-status" id="splashStatus">Initialising camera…</p>
+    </div>
+  </div>
+
+  <!-- ═══════════════ AR CANVAS STACK ═══════════════ -->
+  <!-- Layer 0: Mirror video feed -->
+  <video id="webcam" autoplay playsinline muted></video>
+
+  <!-- Layer 1: Three.js 3D overlay (transparent bg) -->
+  <canvas id="canvas3d"></canvas>
+
+  <!-- Layer 2: UI / gesture visualisation (2D canvas) -->
+  <canvas id="canvasUI"></canvas>
+
+  <!-- ═══════════════ HUD ═══════════════ -->
+  <div id="hud" class="hud hidden">
+    <div class="hud-left">
+      <span class="hud-logo">ZYRO AR</span>
+    </div>
+    <div class="hud-center" id="hudItemLabel">
+      <span class="item-category" id="hudCategory">👓 Glasses</span>
+      <span class="item-name" id="hudItemName">Classic Oval</span>
+    </div>
+    <div class="hud-right">
+      <span class="hud-stat" id="hudFPS">-- FPS</span>
+      <span class="hud-dot" id="dotFace" title="Face">●</span>
+      <span class="hud-dot" id="dotPose" title="Body">●</span>
+      <span class="hud-dot" id="dotHand" title="Hands">●</span>
+    </div>
+  </div>
+
+  <!-- ═══════════════ GESTURE INDICATOR ═══════════════ -->
+  <div id="gestureIndicator" class="gesture-indicator hidden">
+    <span class="gesture-icon" id="gestureIcon">🤏</span>
+    <span class="gesture-label" id="gestureLabel">Pinch</span>
+  </div>
+
+  <!-- ═══════════════ HINT BAR ═══════════════ -->
+  <div id="hintBar" class="hint-bar hidden">
+    <span>✋ Palm = Catalogue</span>
+    <span>🤏 Pinch = Select</span>
+    <span>↔ Flick = Next/Prev</span>
+    <span>🙌 Two hands = Zoom/Rotate</span>
+  </div>
+
+  <!-- ═══════════════ CATALOGUE PANEL ═══════════════ -->
+  <div id="catalogue" class="catalogue hidden">
+    <div class="catalogue-header">
+      <span class="catalogue-title">Try-On Collection</span>
+      <button class="catalogue-close" id="catalogueClose">✕</button>
+    </div>
+    <div class="catalogue-tabs" id="catalogueTabs"></div>
+    <div class="catalogue-grid" id="catalogueGrid"></div>
+  </div>
+
+  <!-- ═══════════════ CONTROL CENTER (wrist raise) ═══════════════ -->
+  <div id="controlCenter" class="control-center hidden">
+    <div class="cc-grid">
+      <button class="cc-btn" id="ccToggleCatalogue" title="Catalogue">🛍️</button>
+      <button class="cc-btn" id="ccToggleDebug" title="Debug">🔬</button>
+      <button class="cc-btn" id="ccReset" title="Reset">🔄</button>
+      <button class="cc-btn" id="ccRecord" title="Record">⏺</button>
+    </div>
+  </div>
+
+  <!-- ═══════════════ CONTEXT MENU (pinch hold) ═══════════════ -->
+  <div id="contextMenu" class="context-menu hidden">
+    <button class="ctx-item" data-action="info">ℹ️ Item Info</button>
+    <button class="ctx-item" data-action="favourite">❤️ Favourite</button>
+    <button class="ctx-item" data-action="reset">🔄 Reset Position</button>
+    <button class="ctx-item" data-action="fullscreen">⛶ Fullscreen</button>
+  </div>
+
+  <!-- Bootstrap -->
+  <script type="module" src="src/main.js"></script>
+</body>
+</html>

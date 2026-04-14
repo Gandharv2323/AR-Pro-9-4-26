@@ -1,0 +1,69 @@
+{
+  "version": "1.1.0",
+  "items": [
+    {
+      "id": "glasses_01",
+      "category": "glasses",
+      "name": "Stylized Eyeglasses Set",
+      "modelUrl": "assets/models/glasses/glasses_01.glb",
+      "thumbnail": null,
+      "isNew": true
+    },
+    {
+      "id": "glasses_02",
+      "category": "glasses",
+      "name": "Classic Oval (3D)",
+      "modelUrl": "assets/models/glasses/glasses_02.glb",
+      "thumbnail": null,
+      "isNew": false
+    },
+    {
+      "id": "glasses_03",
+      "category": "glasses",
+      "name": "Aviator Gold (3D)",
+      "modelUrl": "assets/models/glasses/glasses_03.glb",
+      "thumbnail": null,
+      "isNew": false
+    },
+    {
+      "id": "shirt_01",
+      "category": "shirt",
+      "name": "Stylized Hoodie Jacket",
+      "modelUrl": "assets/models/shirts/shirt_01.glb",
+      "thumbnail": null,
+      "isNew": true
+    },
+    {
+      "id": "shirt_02",
+      "category": "shirt",
+      "name": "XD Full Outfit Hoodie",
+      "modelUrl": "assets/models/shirts/shirt_02.glb",
+      "thumbnail": null,
+      "isNew": true
+    },
+    {
+      "id": "shirt_03",
+      "category": "shirt",
+      "name": "Navy Casual",
+      "modelUrl": "assets/models/shirts/shirt_03.glb",
+      "thumbnail": null,
+      "isNew": false
+    },
+    {
+      "id": "hat_01",
+      "category": "hat",
+      "name": "Black Cap",
+      "modelUrl": "assets/models/hats/hat_01.glb",
+      "thumbnail": null,
+      "isNew": false
+    },
+    {
+      "id": "watch_01",
+      "category": "watch",
+      "name": "Silver Sport",
+      "modelUrl": "assets/models/watches/watch_01.glb",
+      "thumbnail": null,
+      "isNew": false
+    }
+  ]
+}
