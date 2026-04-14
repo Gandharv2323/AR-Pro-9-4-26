@@ -71,10 +71,12 @@ export function estimateHeadPose(lms, W) {
   const pitchRatio = (nose.y - bridge.y) / (faceHeight * 0.3 + 0.001);
   const pitch = Math.atan(pitchRatio) * -0.7;
 
-  // ── SCALE: reference = eyeDistPx at "normal viewing distance" ────────────
-  // We calibrate: at ~60cm, eye dist ≈ 200px on 640px-wide frame
-  const REFERENCE_EYE_PX = 200;
-  const scale = Math.max(0.3, Math.min(3, eyeDistPx / REFERENCE_EYE_PX));
+  // ── SCALE: normalized eye distance relative to reference face width ──────
+  // In a normalized [0,1] image, eye-to-eye distance ≈ 0.20 for a typical
+  // face at arm's length. Closer face → larger eyeDistNorm.
+  // We target scale=1 at eyeDistNorm≈0.20 (arm's length, ~60cm)
+  const REFERENCE_EYE_DIST = 0.20;   // normalized, resolution-independent
+  const scale = Math.max(0.25, Math.min(4.0, eyeDistNorm / REFERENCE_EYE_DIST));
 
   return {
     yaw, pitch, roll, scale,
