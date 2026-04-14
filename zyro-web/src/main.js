@@ -1,23 +1,19 @@
 /**
- * main.js  — Zyro AR Web Orchestrator  v2
+ * main.js  — Zyro AR Web Orchestrator  v3
  *
- * FIXES v2:
- *   - Shared MediaPipe WASM pool (one load instead of three)
- *   - Staggered inference: hands every frame, face every 2nd, pose every 5th
- *   - Gesture engine public fields (no private access hacks)
- *   - Splash tracks progress properly via addProgress()
- *   - Catalogue item-select → async model load properly awaited
- *   - Resize handled before first frame
- *   - preloadModels() warms up GLB cache on boot
- *   - Context menu closes on next click or ESC
- *   - Debug toggle shows landmark indices
- *   - Record button captures canvas stream as WebM
+ * v3 KEY CHANGE: Face + Pose inference moved to inference-worker.js (Web Worker).
+ *   - Main thread rAF loop now runs at native 60 FPS (no ML stall per frame)
+ *   - Worker delivers results async → applied on next available frame
+ *   - Hand detection stays on main thread (gesture latency is critical)
+ *   - Worker and hand model load IN PARALLEL → faster boot
+ *
+ * Architecture:
+ *   Main thread:  Camera → HandDetector → GestureEngine → Renderer → HUD
+ *   Worker thread: FaceDetector → PoseLandmarker → postMessage results
  */
 
 import { initPool }          from './ar-core/detector-pool.js';
 import { HandDetector }      from './ar-core/hand-detector.js';
-import { FaceDetector }      from './ar-core/face-detector.js';
-import { PoseDetector }      from './ar-core/pose-detector.js';
 import { LandmarkSmoother }  from './gesture/smoother.js';
 import { GestureEngine }     from './gesture/gesture-engine.js';
 import { Renderer3D }        from './rendering/renderer-3d.js';
@@ -31,14 +27,14 @@ const video    = document.getElementById('webcam');
 const canvas3d = document.getElementById('canvas3d');
 const canvasUI = document.getElementById('canvasUI');
 
-// ── State ─────────────────────────────────────────────────────────────────────
-let faceLms  = null;
-let poseLms  = null;
-let handsLms = [];
-let frameNum = 0;
+// ── AR State ──────────────────────────────────────────────────────────────────
+let faceLms       = null;
+let poseLms       = null;
+let handsLms      = [];
+let frameNum      = 0;
 let lastFrameTime = performance.now();
-let debugMode = false;
-let recording = false;
+let debugMode     = false;
+let recording     = false;
 let mediaRecorder = null;
 
 let currentItem     = null;
@@ -48,15 +44,15 @@ let overlayOffset = { x: 0, y: 0, z: 0 };
 let overlayScale  = 1.0;
 let overlayRotY   = 0;
 
-// Time-budget inference schedule (ms since last call)
-let _lastFaceMs = 0;
-let _lastPoseMs = 0;
-const FACE_INTERVAL_MS = 80;    // ~12 Hz — face pose is stable
-const POSE_INTERVAL_MS = 250;   // ~4  Hz — shirt anchor rarely changes fast
+// Worker timing (controls how often we snapshot video → worker)
+let _lastFaceRequestMs = 0;
+let _lastPoseRequestMs = 0;
+const FACE_REQUEST_INTERVAL_MS = 80;    // ~12 Hz
+const POSE_REQUEST_INTERVAL_MS = 250;   // ~4  Hz
 
 // ── Modules ───────────────────────────────────────────────────────────────────
-const splash    = new Splash();
-const hud       = new HUD();
+const splash     = new Splash();
+const hud        = new HUD();
 
 let renderer3d  = null;
 let gestureViz  = null;
@@ -66,16 +62,101 @@ let catalogue   = null;
 const handSmoother = new LandmarkSmoother(0.50);
 const faceSmoother = new LandmarkSmoother(0.40);
 const poseSmoother = new LandmarkSmoother(0.35);
-
-const faceDetector = new FaceDetector();
-const poseDetector = new PoseDetector();
 const handDetector = new HandDetector();
 
+// ── Splash progress helper ────────────────────────────────────────────────────
 let splashPct = 0;
 function addProgress(delta, msg) {
   splashPct = Math.min(99, splashPct + delta);
   splash.setProgress(splashPct, msg);
 }
+
+// ── Inference Worker wrapper ──────────────────────────────────────────────────
+class InferenceWorker {
+  constructor() {
+    this._worker  = null;
+    this._ready   = false;
+    this._busy    = false;
+    this._readyPr = null;
+    this._readyCb = null;
+
+    this._readyPr = new Promise(res => { this._readyCb = res; });
+  }
+
+  /** Start the worker, return Promise that resolves when worker posts 'ready' */
+  start(onProgress) {
+    this._worker = new Worker('./src/ar-core/inference-worker.js', { type: 'module' });
+
+    this._worker.onmessage = (e) => {
+      const { type } = e.data;
+
+      if (type === 'ready') {
+        this._ready = true;
+        this._readyCb?.();
+        onProgress?.(5, 'AI models ready ✓');
+
+      } else if (type === 'init-progress') {
+        onProgress?.(0, e.data.msg);
+
+      } else if (type === 'init-error') {
+        console.error('[InferenceWorker] init error:', e.data.msg);
+        // Still resolve so bootstrap doesn't hang — face/pose disabled
+        this._ready = true;
+        this._readyCb?.();
+
+      } else if (type === 'results') {
+        this._busy = false;
+        const { faceLandmarks, poseLandmarks, timestamp } = e.data;
+
+        if (faceLandmarks) {
+          faceLms = faceSmoother.update(faceLandmarks);
+        } else if (faceLandmarks === null) {
+          // Explicit null = no face detected
+          faceLms = null;
+        }
+
+        if (poseLandmarks) {
+          poseLms = poseSmoother.update(poseLandmarks);
+        } else if (poseLandmarks === null) {
+          poseLms = null;
+        }
+      }
+    };
+
+    this._worker.onerror = (err) => {
+      console.error('[InferenceWorker] worker error:', err.message);
+      this._busy = false;
+    };
+
+    return this._readyPr;
+  }
+
+  /**
+   * Request detection. Captures current video frame and transfers to worker.
+   * @param {boolean} runFace
+   * @param {boolean} runPose
+   */
+  async requestDetection(runFace, runPose) {
+    if (!this._ready || this._busy) return;
+    if (!runFace && !runPose) return;
+
+    this._busy = true;
+    try {
+      const imageBitmap = await createImageBitmap(video);
+      this._worker.postMessage(
+        { type: 'detect', imageBitmap, runFace, runPose, timestamp: performance.now() },
+        [imageBitmap]   // zero-copy transfer
+      );
+    } catch (err) {
+      console.warn('[InferenceWorker] createImageBitmap failed:', err.message);
+      this._busy = false;
+    }
+  }
+
+  terminate() { this._worker?.terminate(); }
+}
+
+const inferenceWorker = new InferenceWorker();
 
 // ── Bootstrap ─────────────────────────────────────────────────────────────────
 async function bootstrap() {
@@ -83,86 +164,73 @@ async function bootstrap() {
 
   // ── 1. Camera ───────────────────────────────────────────────────────────────
   try {
-    const constraints = {
-      video: {
-        width:  { ideal: 1280, max: 1920 },
-        height: { ideal: 720,  max: 1080 },
-        facingMode: 'user',
-        frameRate: { ideal: 30, max: 60 },
-      },
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { width: { ideal: 1280 }, height: { ideal: 720 },
+               facingMode: 'user', frameRate: { ideal: 30 } },
       audio: false,
-    };
-    const stream = await navigator.mediaDevices.getUserMedia(constraints);
-    video.srcObject = stream;
-    await new Promise((res, rej) => {
-      video.onloadedmetadata = res;
-      setTimeout(rej, 10000);   // 10s timeout
     });
+    video.srcObject = stream;
+    await new Promise((res, rej) => { video.onloadedmetadata = res; setTimeout(rej, 10000); });
     await video.play();
   } catch (err) {
-    splash.setProgress(0, `❌ Camera: ${err.message}. Allow camera access and reload.`);
+    splash.setProgress(0, `❌ Camera: ${err.message}. Allow access & reload.`);
     return;
   }
+  addProgress(8, 'Camera ready ✓');
 
-  addProgress(10, 'Camera ready');
-
-  // ── 2. Resize canvas to window ──────────────────────────────────────────────
+  // ── 2. Resize canvases ──────────────────────────────────────────────────────
   _resizeCanvases();
   window.addEventListener('resize', _resizeCanvases);
 
-  // ── 3. MediaPipe shared WASM pool ───────────────────────────────────────────
+  // ── 3. Start inference worker (loads face+pose in background) ───────────────
+  addProgress(3, 'Starting AI worker…');
+  const workerPromise = inferenceWorker.start((delta, msg) => addProgress(delta, msg));
+  // NOTE: worker loading happens in parallel with step 4 below!
+
+  // ── 4. Main thread: WASM pool + hand detector (parallel with worker) ────────
   try {
     await initPool(msg => addProgress(0, msg));
-    addProgress(15, 'WASM runtime loaded');
+    addProgress(10, 'WASM pool ready ✓');
+    await handDetector.init(msg => addProgress(0, msg));
+    addProgress(15, 'Hand model ready ✓');
   } catch (err) {
-    splash.setProgress(0, `❌ WASM: ${err.message}`);
+    splash.setProgress(0, `❌ Hand detector: ${err.message}`);
     return;
   }
 
-  // ── 4. Detectors — sequential (share WASM, faster than parallel) ────────────
-  try {
-    await faceDetector.init(msg => addProgress(0, msg));  addProgress(15, 'Face model ✓');
-    await handDetector.init(msg => addProgress(0, msg));  addProgress(15, 'Hand model ✓');
-    await poseDetector.init(msg => addProgress(0, msg));  addProgress(10, 'Pose model ✓');
-  } catch (err) {
-    splash.setProgress(0, `❌ Detector: ${err.message}`);
-    return;
-  }
+  // ── 5. Wait for worker (face + pose — may already be done) ──────────────────
+  addProgress(0, 'Waiting for face/pose models…');
+  await workerPromise;
+  addProgress(20, 'All AI models loaded ✓');
 
-  // ── 5. Three.js renderer ────────────────────────────────────────────────────
-  addProgress(5, 'Setting up 3D renderer…');
+  // ── 6. Three.js renderer ────────────────────────────────────────────────────
+  addProgress(4, 'Setting up 3D renderer…');
   renderer3d = new Renderer3D(canvas3d);
 
-  // ── 6. UI modules ───────────────────────────────────────────────────────────
+  // ── 7. UI modules ───────────────────────────────────────────────────────────
   gestureViz = new GestureViz(canvasUI);
   gestureEng = new GestureEngine();
   catalogue  = new Catalogue();
 
-  addProgress(5, 'Loading catalogue…');
+  addProgress(3, 'Loading catalogue…');
   await catalogue.load('./manifest.json');
 
-  // ── 7. Preload first GLB model ──────────────────────────────────────────────
+  // ── 8. Preload first-category GLBs ─────────────────────────────────────────
   const firstItems = catalogue.getItems('glasses');
-  if (firstItems[0]) {
-    renderer3d.preloadModels(firstItems.map(i => i.modelUrl));
-  }
+  if (firstItems.length) renderer3d.preloadModels(firstItems.map(i => i.modelUrl));
 
-  // ── 8. Wire events ──────────────────────────────────────────────────────────
+  // ── 9. Wire events ──────────────────────────────────────────────────────────
   _wireGestureEvents();
   _wireControlCenter();
   _wireCatalogue();
   _wireKeyboard();
 
-  // ── 9. Load first item ──────────────────────────────────────────────────────
+  // ── 10. Load first item ─────────────────────────────────────────────────────
   if (firstItems[0]) await _loadItem(firstItems[0]);
 
-  // ── 10. Launch ──────────────────────────────────────────────────────────────
+  // ── 11. Launch ──────────────────────────────────────────────────────────────
   addProgress(5, 'Ready! 🚀');
-  setTimeout(() => {
-    splash.hide();
-    hud.show();
-  }, 400);
-
+  setTimeout(() => { splash.hide(); hud.show(); }, 400);
   requestAnimationFrame(_arLoop);
 }
 
@@ -200,25 +268,22 @@ function _wireGestureEvents() {
   });
 
   eng.addEventListener('drag', e => {
-    // Moving overlay: dx/dy are normalized, convert to world units
     const SENS = 1.2;
-    overlayOffset.x -= e.detail.dx * SENS;   // negate: mirror
+    overlayOffset.x -= e.detail.dx * SENS;
     overlayOffset.y -= e.detail.dy * SENS;
     if (renderer3d) renderer3d.gestureOffset = { ...overlayOffset };
     gestureViz.addDragPoint(e.detail.x, e.detail.y);
   });
 
-  eng.addEventListener('drag-end', () => {
-    gestureViz.clearDragTrail();
-  });
+  eng.addEventListener('drag-end', () => gestureViz.clearDragTrail());
 
   eng.addEventListener('flick', async e => {
     hud.showGesture('flick');
     gestureViz.showGesture('flick');
     const items = catalogue.getItems(currentCategory);
     if (!items.length) return;
-    const idx  = items.findIndex(i => i.id === currentItem?.id);
-    const dir  = (e.detail.dir === 'right' || e.detail.dir === 'down') ? 1 : -1;
+    const idx = items.findIndex(i => i.id === currentItem?.id);
+    const dir = (e.detail.dir === 'right' || e.detail.dir === 'down') ? 1 : -1;
     const next = items[(idx + dir + items.length) % items.length];
     if (next && next.id !== currentItem?.id) await _loadItem(next);
   });
@@ -279,9 +344,8 @@ function _resetOverlay() {
 function _toggleCC() {
   _ccOpen = !_ccOpen;
   const cc = document.getElementById('controlCenter');
-  if (!cc) return;
-  cc.classList.toggle('hidden', !_ccOpen);
-  if (_ccOpen) cc.classList.remove('hidden');
+  cc?.classList.toggle('hidden', !_ccOpen);
+  if (_ccOpen) cc?.classList.remove('hidden');
 }
 
 // ── Catalogue ─────────────────────────────────────────────────────────────────
@@ -292,20 +356,18 @@ function _wireCatalogue() {
   });
   catalogue.addEventListener('category-change', e => {
     currentCategory = e.detail.category;
-    // Preload models in new category
-    const items = catalogue.getItems(currentCategory);
-    renderer3d?.preloadModels(items.map(i => i.modelUrl));
+    renderer3d?.preloadModels(catalogue.getItems(currentCategory).map(i => i.modelUrl));
   });
   document.getElementById('catalogueClose')?.addEventListener('click', () => catalogue.close());
 }
 
-// ── Keyboard Shortcuts ────────────────────────────────────────────────────────
+// ── Keyboard ──────────────────────────────────────────────────────────────────
 function _wireKeyboard() {
   document.addEventListener('keydown', e => {
-    if (e.key === 'Escape')  { _closeContextMenu(); catalogue.close(); _ccOpen = false; document.getElementById('controlCenter')?.classList.add('hidden'); }
-    if (e.key === 'd')       { debugMode = !debugMode; }
-    if (e.key === 'r')       { _resetOverlay(); }
-    if (e.key === 'c')       { catalogue.toggle(); }
+    if (e.key === 'Escape')     { _closeContextMenu(); catalogue.close(); _ccOpen = false; document.getElementById('controlCenter')?.classList.add('hidden'); }
+    if (e.key === 'd')          { debugMode = !debugMode; }
+    if (e.key === 'r')          { _resetOverlay(); }
+    if (e.key === 'c')          { catalogue.toggle(); }
     if (e.key === 'ArrowRight') { _nextItem(1); }
     if (e.key === 'ArrowLeft')  { _nextItem(-1); }
   });
@@ -324,7 +386,6 @@ async function _loadItem(item) {
   currentItem     = item;
   currentCategory = item.category;
   hud.setItem(item.category, item.name);
-
   if (!renderer3d) return;
 
   let group;
@@ -334,41 +395,30 @@ async function _loadItem(item) {
     console.warn(`[Zyro] No GLB at ${item.modelUrl} — using fallback`);
     group = renderer3d.getFallbackMesh(item.category);
   }
-
   renderer3d.setActiveModel(group, item.category);
 }
 
-// ── AR Loop ───────────────────────────────────────────────────────────────────
+// ── AR Loop (now runs at native 60 FPS) ───────────────────────────────────────
 function _arLoop(timestamp) {
   const now = performance.now();
-  const dt  = Math.max(1, now - lastFrameTime);   // ms, clamped to avoid /0
+  const dt  = Math.max(1, now - lastFrameTime);
   lastFrameTime = now;
 
-  // ── Inference schedule (time-budget, not frame-count) ──────────────────────
-  //  Hands: EVERY frame — gesture latency is critical (<~33ms target)
-  //  Face:  max ~12 Hz — head pose changes slowly
-  //  Pose:  max ~4  Hz — body anchor barely moves; only when shirt shown
-  const ts = Math.floor(timestamp);
-
-  // Always detect hands
-  const rawHands = handDetector.detect(video, ts);
+  // ── Hand detection — main thread, every frame ─────────────────────────────
+  const rawHands = handDetector.detect(video, Math.floor(timestamp));
   handsLms = rawHands.map(h => handSmoother.update(h));
 
-  // Face — time-gated
-  if (now - _lastFaceMs >= FACE_INTERVAL_MS) {
-    _lastFaceMs = now;
-    const raw = faceDetector.detect(video, ts);
-    faceLms = raw ? faceSmoother.update(raw) : null;
-  }
-
-  // Pose — time-gated, AND only when shirt is active (saves ~15ms/frame)
+  // ── Issue async inference requests to worker (time-gated) ─────────────────
   const needPose = currentCategory === 'shirt' || currentCategory === 'bag';
-  if (needPose && now - _lastPoseMs >= POSE_INTERVAL_MS) {
-    _lastPoseMs = now;
-    const raw = poseDetector.detect(video, ts);
-    poseLms = raw ? poseSmoother.update(raw) : null;
-  } else if (!needPose) {
-    poseLms = null;  // clear cached pose when not needed
+  const runFace  = (now - _lastFaceRequestMs) >= FACE_REQUEST_INTERVAL_MS;
+  const runPose  = needPose && (now - _lastPoseRequestMs) >= POSE_REQUEST_INTERVAL_MS;
+
+  if (runFace) _lastFaceRequestMs = now;
+  if (runPose) _lastPoseRequestMs = now;
+
+  if (runFace || runPose) {
+    // Fire-and-forget — results arrive via worker.onmessage and update faceLms/poseLms
+    inferenceWorker.requestDetection(runFace, runPose);
   }
 
   frameNum++;
@@ -376,18 +426,16 @@ function _arLoop(timestamp) {
   // ── Gesture engine ─────────────────────────────────────────────────────────
   gestureEng?.update(handsLms, timestamp);
 
-  // Hold-progress arc
-  if (gestureEng &&
-      (gestureEng.state === 'PINCH_START' || gestureEng.state === 'PINCH_HOLD')) {
-    const elapsed = now - gestureEng.pinchStartTime;
-    const prog    = Math.min(1, elapsed / 750);
-    const c       = gestureEng.pinchStartCenter;
+  // Hold arc progress
+  if (gestureEng && (gestureEng.state === 'PINCH_START' || gestureEng.state === 'PINCH_HOLD')) {
+    const prog = Math.min(1, (now - gestureEng.pinchStartTime) / 750);
+    const c    = gestureEng.pinchStartCenter;
     gestureViz?.setHoldProgress(prog, c?.x, c?.y);
   } else {
     gestureViz?.setHoldProgress(0);
   }
 
-  // ── 3D scene ───────────────────────────────────────────────────────────────
+  // ── 3D rendering — uses last known faceLms/poseLms (async, never stalls) ───
   renderer3d?.update(faceLms, poseLms, currentCategory ?? 'glasses');
   renderer3d?.render();
 
@@ -409,7 +457,6 @@ function _resizeCanvases() {
   renderer3d?.resize(w, h);
 }
 
-// Context menu
 function _showContextMenu(px, py) {
   const menu = document.getElementById('contextMenu');
   if (!menu) return;
@@ -420,13 +467,12 @@ function _showContextMenu(px, py) {
   menu.querySelectorAll('.ctx-item').forEach(btn => {
     btn.onclick = () => {
       const a = btn.dataset.action;
-      if (a === 'reset') _resetOverlay();
+      if (a === 'reset')      _resetOverlay();
       if (a === 'fullscreen') document.documentElement.requestFullscreen?.();
       _closeContextMenu();
     };
   });
 }
-
 function _closeContextMenu() {
   document.getElementById('contextMenu')?.classList.add('hidden');
 }
@@ -436,7 +482,6 @@ document.addEventListener('click', e => {
   if (menu && !menu.contains(e.target)) _closeContextMenu();
 });
 
-// Record
 function _toggleRecord() {
   const btn = document.getElementById('ccRecord');
   if (!recording) {
@@ -447,24 +492,23 @@ function _toggleRecord() {
     mediaRecorder.ondataavailable = e => chunks.push(e.data);
     mediaRecorder.onstop = () => {
       const blob = new Blob(chunks, { type: 'video/webm' });
-      const url  = URL.createObjectURL(blob);
       const a    = document.createElement('a');
-      a.href = url; a.download = `zyro-ar-${Date.now()}.webm`; a.click();
+      a.href = URL.createObjectURL(blob);
+      a.download = `zyro-ar-${Date.now()}.webm`;
+      a.click();
     };
     mediaRecorder.start();
     recording = true;
     btn?.classList.add('active');
-    btn?.setAttribute('title', 'Stop Recording');
   } else {
     mediaRecorder?.stop();
     recording = false;
     btn?.classList.remove('active');
-    btn?.setAttribute('title', 'Record');
   }
 }
 
 // ── Start ─────────────────────────────────────────────────────────────────────
 bootstrap().catch(err => {
   console.error('[Zyro] Boot failure:', err);
-  splash.setProgress(0, `❌ ${err.message}. Check console (F12). Try reloading.`);
+  splash.setProgress(0, `❌ ${err.message}. Check console (F12) & reload.`);
 });

@@ -1,15 +1,12 @@
 /**
- * renderer-3d.js  — v2
+ * renderer-3d.js  — v3
  * Three.js scene manager for 3D GLB asset overlay.
  *
- * FIXES v2:
- *   - Auto-normalize: fit any GLB to a canonical bounding box on load
- *   - Scale formula corrected — models now visible at normal camera distance
- *   - Mirror correction: model X is flipped to match mirrored video
- *   - GLB not found → elegant fallback procedural geometry (no crash)
- *   - Preload: preloadModels() to warm up cache
- *   - PBR setup: traverse + envMapIntensity on all mesh materials
- *   - dispose() properly clears cache
+ * v3 changes:
+ *   - Shirt uses real pose shoulder anchor (not face bridge)
+ *   - Face-derived torso fallback when pose landmarks unavailable
+ *   - Debug logging for shirt anchor tuning (set SHIRT_DEBUG = true)
+ *   - CAT_CONFIG tuned for glasses_01 real scale
  */
 
 import * as THREE from 'three';
@@ -19,13 +16,57 @@ import { estimateHeadPose, normToWorld } from './head-pose.js';
 
 const DRACO_CDN = 'https://www.gstatic.com/draco/versioned/decoders/1.5.7/';
 
-// Category-specific tuning
+// Set true to log pose anchor values to console each frame (shirt debugging)
+let SHIRT_DEBUG = false;
+export function setShirtDebug(v) { SHIRT_DEBUG = v; }
+
+// ── Category-specific display tuning ──────────────────────────────────────────
+// yOff:        World-space Y offset after anchor (positive = up)
+// targetWidth: How wide the model appears in world units at reference depth
+// depth:       Z distance from camera (negative = in front)
 const CAT_CONFIG = {
-  glasses: { yOff:  0.01, targetWidth: 0.18, depth: -1.8 },
-  hat:     { yOff:  0.25, targetWidth: 0.30, depth: -1.8 },
-  shirt:   { yOff: -0.55, targetWidth: 0.60, depth: -2.0 },
-  watch:   { yOff:  0.0,  targetWidth: 0.12, depth: -1.8 },
-  bag:     { yOff: -0.3,  targetWidth: 0.40, depth: -2.0 },
+  glasses: {
+    yOff:        0.01,    // Sit on nose bridge — no offset needed
+    targetWidth: 0.20,    // ~20cm wide — matches real eyewear
+    depth:       -1.8,    // Arm's-length ≈ 60cm from camera
+    anchor:      'face',  // Uses nose bridge landmark
+  },
+  hat: {
+    yOff:        0.28,    // Above forehead
+    targetWidth: 0.32,
+    depth:       -1.8,
+    anchor:      'face',
+  },
+  shirt: {
+    yOff:        -0.12,   // Fine-tune: shoulder midpoint → neckline align (tuned Apr 2026)
+    targetWidth:  0.72,   // Shoulder width in world units (tuned Apr 2026)
+    depth:        -2.0,
+    anchor:       'pose', // Uses shoulder landmarks from PoseLandmarker
+    // Pose fallback (when pose is unavailable): estimate torso from face
+    // torsoDropFactor: how many face-heights below nose to place shirt neckline
+    torsoDropFactor: 1.6,
+  },
+  watch: {
+    yOff:        0.0,
+    targetWidth: 0.12,
+    depth:       -1.8,
+    anchor:      'face',
+  },
+  bag: {
+    yOff:       -0.55,
+    targetWidth: 0.45,
+    depth:       -2.0,
+    anchor:      'pose',
+    torsoDropFactor: 2.2,
+  },
+};
+
+// MediaPipe Pose landmark indices (0-indexed, PoseLandmarker order)
+const POSE_IDX = {
+  L_SHOULDER: 11,
+  R_SHOULDER: 12,
+  L_HIP:      23,
+  R_HIP:      24,
 };
 
 export class Renderer3D {
@@ -282,41 +323,107 @@ export class Renderer3D {
    * @param {Array<{x,y,z}>|null} _poseLms   (reserved — shirt body anchor)
    * @param {string}              category
    */
-  update(faceLms, _poseLms, category) {
+  update(faceLms, poseLms, category) {
     if (!this._active) return;
 
-    const pose = estimateHeadPose(faceLms, this._w);
+    const cfg     = CAT_CONFIG[category] ?? CAT_CONFIG.glasses;
+    const fov     = this._camera.fov;
+    const aspect  = this._camera.aspect;
+    const depth   = cfg.depth;
 
-    if (!pose) {
-      // No face — keep showing last known position (don't flicker off)
-      return;
+    let wp, anchorScale;
+
+    // ── SHIRT / BAG: use pose shoulder anchor ─────────────────────────────────
+    if (cfg.anchor === 'pose') {
+
+      const pose = estimateHeadPose(faceLms, this._w);
+      let anchorNorm = null;
+
+      // ── Try pose landmarks first ────────────────────────────────────────────
+      if (poseLms && poseLms.length > POSE_IDX.R_SHOULDER) {
+        const lSho = poseLms[POSE_IDX.L_SHOULDER];
+        const rSho = poseLms[POSE_IDX.R_SHOULDER];
+
+        const lVis  = lSho.visibility ?? 1;
+        const rVis  = rSho.visibility ?? 1;
+        const avgV  = (lVis + rVis) / 2;
+
+        if (avgV > 0.4) {
+          // Shoulder midpoint (normalized coords)
+          const mx = (lSho.x + rSho.x) / 2;
+          const my = (lSho.y + rSho.y) / 2;
+          // Shoulder span → scale reference (in normalized space)
+          const shoulderSpanNorm = Math.abs(rSho.x - lSho.x);
+          anchorScale = Math.max(0.3, Math.min(4.0, shoulderSpanNorm / 0.30));
+          anchorNorm  = { x: mx, y: my };
+
+          if (SHIRT_DEBUG) {
+            const lH = poseLms[POSE_IDX.L_HIP];
+            const rH = poseLms[POSE_IDX.R_HIP];
+            console.table({
+              L_shoulder:     { x: lSho.x.toFixed(3), y: lSho.y.toFixed(3), vis: lVis.toFixed(2) },
+              R_shoulder:     { x: rSho.x.toFixed(3), y: rSho.y.toFixed(3), vis: rVis.toFixed(2) },
+              L_hip:          { x: lH?.x.toFixed(3), y: lH?.y.toFixed(3) },
+              R_hip:          { x: rH?.x.toFixed(3), y: rH?.y.toFixed(3) },
+              shoulderSpan:   shoulderSpanNorm.toFixed(3),
+              anchorScale:    anchorScale.toFixed(2),
+              cfg_yOff:       cfg.yOff,
+              cfg_targetWidth: cfg.targetWidth,
+            });
+          }
+        }
+      }
+
+      // ── Fallback: estimate torso position from face ─────────────────────────
+      if (!anchorNorm && pose) {
+        const faceHeight = pose.chin ? Math.abs(pose.chin.y - pose.eyeMid.y) : 0.12;
+        anchorNorm  = {
+          x: pose.nosePos.x,
+          y: pose.nosePos.y + faceHeight * (cfg.torsoDropFactor ?? 1.6),
+        };
+        anchorScale = pose.scale;
+
+        if (SHIRT_DEBUG) {
+          console.log('[Shirt] Using FACE FALLBACK anchor',
+            anchorNorm, 'faceHeight:', faceHeight.toFixed(3));
+        }
+      }
+
+      if (!anchorNorm) return;  // No face AND no pose — nothing to do
+
+      wp           = normToWorld(anchorNorm, anchorScale, fov, aspect, depth);
+      anchorScale  = anchorScale ?? 1;
+
+    } else {
+      // ── GLASSES / HAT / WATCH: use face anchor ─────────────────────────────
+      const pose = estimateHeadPose(faceLms, this._w);
+      if (!pose) return;   // Keep last position rather than flicker
+
+      const anchor = (category === 'hat') ? pose.eyeMid : pose.bridgePos;
+      wp           = normToWorld(anchor, pose.scale, fov, aspect, depth);
+      anchorScale  = pose.scale;
+
+      // Face rotation applied here (not for shirts — body doesn't rotate like head)
+      this._active.rotation.set(pose.pitch * 0.8, pose.yaw + this.gestureRotY, pose.roll);
     }
 
-    const cfg = CAT_CONFIG[category] ?? CAT_CONFIG.glasses;
-
-    // Anchor landmark
-    const anchor = (category === 'hat') ? pose.eyeMid : pose.bridgePos;
-
-    // Convert to world space
-    const wp = normToWorld(anchor, pose.scale, this._camera.fov, this._camera.aspect, cfg.depth);
-
-    // Apply gesture + category offsets
+    // ── Position ───────────────────────────────────────────────────────────────
     this._active.position.set(
       wp.x + this.gestureOffset.x,
       wp.y + cfg.yOff + this.gestureOffset.y,
       wp.z + this.gestureOffset.z
     );
 
-    // Rotation — face pose + user rotate gesture
-    this._active.rotation.set(pose.pitch * 0.8, pose.yaw + this.gestureRotY, pose.roll);
-
-    // Scale = (canonical size / 1.0 after normalization) × face scale × gesture
-    // After normalization, model is 1 unit wide. We want targetWidth in world space.
-    const worldHeight = 2 * Math.abs(cfg.depth) * Math.tan((this._camera.fov * Math.PI / 180) / 2);
-    const worldWidth  = worldHeight * this._camera.aspect;
-    const targetWorldUnits = (cfg.targetWidth / worldWidth) * worldWidth; // = targetWidth directly
-    const s = targetWorldUnits * pose.scale * this.gestureScale;
+    // ── Scale ─────────────────────────────────────────────────────────────────
+    // After normalization model is 1 world-unit wide.
+    // targetWidth = desired world-units. Multiply by anchorScale (depth proxy).
+    const s = cfg.targetWidth * anchorScale * this.gestureScale;
     this._active.scale.setScalar(Math.max(0.001, s));
+
+    if (SHIRT_DEBUG) {
+      console.log('[Shirt] model.position', this._active.position);
+      console.log('[Shirt] model.scale', this._active.scale.x.toFixed(3));
+    }
   }
 
   // ── Render ─────────────────────────────────────────────────────────────────

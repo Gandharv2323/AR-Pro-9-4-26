@@ -1,0 +1,290 @@
+<!DOCTYPE html>
+<!--
+  generate-glasses.html
+  =====================
+  Open this page in browser via http://localhost:8080/generate-glasses.html
+  It will auto-generate and download 3 distinct GLB glasses models,
+  calibrated to match glasses_01.glb's pivot/scale conventions:
+    glasses_02.glb — Thin round wire frames
+    glasses_03.glb — Aviator teardrop (gold)
+    glasses_04.glb — Thick wayfarer rectangular
+
+  After download: place files in zyro-web/assets/models/glasses/
+-->
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Zyro GLB Generator</title>
+  <style>
+    body { background: #0d0d1a; color: #00d4ff; font-family: monospace; padding: 40px; }
+    h1   { color: #fff; margin-bottom: 8px; }
+    .log { background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.1);
+           border-radius: 12px; padding: 20px; margin-top: 20px; line-height: 2; }
+    .ok  { color: #00ff88; }
+    .err { color: #ff3355; }
+    button { margin-top: 20px; padding: 12px 24px; background: #00d4ff; color: #000;
+             border: none; border-radius: 8px; font-size: 16px; cursor: pointer; font-weight: 700; }
+  </style>
+  <script type="importmap">
+    {
+      "imports": {
+        "three":         "https://cdn.jsdelivr.net/npm/three@0.168.0/build/three.module.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.168.0/examples/jsm/"
+      }
+    }
+  </script>
+</head>
+<body>
+  <h1>🔧 Zyro GLB Glasses Generator</h1>
+  <p>Generates 3 distinct glasses GLB models calibrated to match glasses_01.glb</p>
+  <div class="log" id="log">Waiting…</div>
+  <button id="btn">▶ Generate & Download All 3</button>
+
+  <script type="module">
+import * as THREE from 'three';
+import { GLTFExporter } from 'three/addons/exporters/GLTFExporter.js';
+
+const log = document.getElementById('log');
+const btn = document.getElementById('btn');
+
+function addLog(msg, ok = true) {
+  const span = document.createElement('div');
+  span.className = ok ? 'ok' : 'err';
+  span.textContent = msg;
+  log.appendChild(span);
+}
+
+// ── Materials ──────────────────────────────────────────────────────────────────
+function metalMat(hex, metalness = 0.95, roughness = 0.08) {
+  return new THREE.MeshStandardMaterial({ color: hex, metalness, roughness });
+}
+function glassMat(hex = 0x88ccff) {
+  return new THREE.MeshStandardMaterial({
+    color: hex, metalness: 0, roughness: 0,
+    transparent: true, opacity: 0.22, side: THREE.DoubleSide,
+  });
+}
+function acetateMat(hex) {
+  return new THREE.MeshStandardMaterial({ color: hex, metalness: 0.05, roughness: 0.45 });
+}
+
+// ── Helper: download .glb ─────────────────────────────────────────────────────
+function exportGLB(scene, filename) {
+  return new Promise((resolve, reject) => {
+    const exporter = new GLTFExporter();
+    exporter.parse(
+      scene,
+      (result) => {
+        const blob = new Blob([result], { type: 'application/octet-stream' });
+        const url  = URL.createObjectURL(blob);
+        const a    = document.createElement('a');
+        a.href = url; a.download = filename; a.click();
+        URL.revokeObjectURL(url);
+        resolve();
+      },
+      (err) => reject(err),
+      { binary: true }
+    );
+  });
+}
+
+// ── CONVENTIONS (match glasses_01.glb after auto-normalize in renderer-3d.js) ──
+// renderer-3d.js auto-normalizes every GLB to unit bounding box centered at origin.
+// So: just center your geometry at origin — scale doesn't matter (auto-adjusted).
+// Orientation: +X = right, +Y = up, +Z = toward viewer.
+// Glasses sit in the XY plane, lenses centered on Z=0.
+
+// ── Model 1: Round wire frames (glasses_02) ───────────────────────────────────
+function makeRoundWireframes() {
+  const group = new THREE.Group();
+  const mat   = metalMat(0xc0c0c0, 0.90, 0.12);  // silver
+  const glas  = glassMat(0xaaddff);
+
+  const LENS_R   = 0.20;   // outer radius
+  const WIRE_R   = 0.016;  // wire thickness
+  const SEP      = 0.42;   // centre-to-centre separation
+
+  for (const xPos of [-SEP / 2, SEP / 2]) {
+    // Rim
+    const rim = new THREE.Mesh(new THREE.TorusGeometry(LENS_R, WIRE_R, 12, 48), mat);
+    rim.position.x = xPos;
+    group.add(rim);
+
+    // Lens fill
+    const lens = new THREE.Mesh(new THREE.CircleGeometry(LENS_R - 0.01, 32), glas);
+    lens.position.set(xPos, 0, 0.01);
+    group.add(lens);
+  }
+
+  // Bridge — thin delicate wire
+  const bridge = new THREE.Mesh(new THREE.CylinderGeometry(0.012, 0.012, 0.10, 6), mat);
+  bridge.rotation.z = Math.PI / 2;
+  bridge.position.set(0, 0, 0);
+  group.add(bridge);
+
+  // Arms — thin straight
+  for (const side of [-1, 1]) {
+    const arm = new THREE.Mesh(new THREE.CylinderGeometry(0.010, 0.008, 0.65, 6), mat);
+    arm.rotation.z = Math.PI / 2;
+    arm.position.set(side * (SEP / 2 + 0.32), 0, -0.08);
+    group.add(arm);
+    // Ear hook bend (small sphere)
+    const hook = new THREE.Mesh(new THREE.SphereGeometry(0.018, 8, 8), mat);
+    hook.position.set(side * (SEP / 2 + 0.62), -0.06, -0.12);
+    group.add(hook);
+  }
+
+  return group;
+}
+
+// ── Model 2: Aviator teardrop (glasses_03) ───────────────────────────────────
+function makeAviators() {
+  const group  = new THREE.Group();
+  const gold   = metalMat(0xd4a017, 0.88, 0.14);
+  const glas   = glassMat(0x88bb99);   // slight green tint — classic aviator
+
+  // Aviator lens shape: a teardrop = circle with bottom pulled down
+  // Approximate with ellipse ring
+  const SEP = 0.48;
+
+  for (const xPos of [-SEP / 2, SEP / 2]) {
+    // Outer ring — slightly taller than wide
+    const outerRing = new THREE.Mesh(
+      new THREE.TorusGeometry(0.21, 0.022, 10, 48, Math.PI * 2),
+      gold
+    );
+    outerRing.position.x = xPos;
+    outerRing.scale.y = 1.20;   // aviator is taller
+    group.add(outerRing);
+
+    // Lens fill
+    const lens = new THREE.Mesh(new THREE.CircleGeometry(0.198, 32), glas);
+    lens.position.set(xPos, 0, 0.01);
+    lens.scale.y = 1.18;
+    group.add(lens);
+
+    // Inner nose guard (mini oval)
+    if (Math.sign(xPos) === -1) {
+      const guard = new THREE.Mesh(new THREE.TorusGeometry(0.04, 0.01, 6, 12), gold);
+      guard.position.set(xPos + 0.16, -0.18, 0);
+      guard.rotation.z = 0.4;
+      group.add(guard);
+    } else {
+      const guard = new THREE.Mesh(new THREE.TorusGeometry(0.04, 0.01, 6, 12), gold);
+      guard.position.set(xPos - 0.16, -0.18, 0);
+      guard.rotation.z = -0.4;
+      group.add(guard);
+    }
+  }
+
+  // Bridge — double wire style
+  for (const dy of [0.06, -0.06]) {
+    const br = new THREE.Mesh(new THREE.CylinderGeometry(0.009, 0.009, 0.14, 6), gold);
+    br.rotation.z = Math.PI / 2;
+    br.position.set(0, dy, 0);
+    group.add(br);
+  }
+
+  // Arms — slightly thicker, cable style
+  for (const side of [-1, 1]) {
+    const arm = new THREE.Mesh(new THREE.CylinderGeometry(0.014, 0.010, 0.70, 6), gold);
+    arm.rotation.z = Math.PI / 2;
+    arm.position.set(side * (SEP / 2 + 0.34), 0.05, -0.10);
+    arm.rotation.y = side * -0.08;
+    group.add(arm);
+  }
+
+  return group;
+}
+
+// ── Model 3: Thick wayfarer rectangular (glasses_04) ─────────────────────────
+function makeWayfarer() {
+  const group = new THREE.Group();
+  const dark  = acetateMat(0x1a1a1a);   // matte black acetate
+  const glas  = glassMat(0x4488aa);     // dark blue-grey tint
+
+  const SEP = 0.50;
+  const W   = 0.24;   // half-width of each lens frame
+  const H   = 0.17;   // half-height
+  const T   = 0.045;  // frame thickness
+
+  for (const xPos of [-SEP / 2, SEP / 2]) {
+    // Thick rectangular frame — built from 4 box segments
+    const top = new THREE.Mesh(new THREE.BoxGeometry(W * 2 + T, T, T), dark);
+    top.position.set(xPos, H, 0);
+    group.add(top);
+
+    const bot = new THREE.Mesh(new THREE.BoxGeometry(W * 2, T * 0.7, T), dark);
+    bot.position.set(xPos, -H, 0);
+    group.add(bot);
+
+    const left = new THREE.Mesh(new THREE.BoxGeometry(T, H * 2, T * 1.2), dark);
+    left.position.set(xPos - W, 0, 0);
+    group.add(left);
+
+    const right = new THREE.Mesh(new THREE.BoxGeometry(T, H * 2, T * 1.2), dark);
+    right.position.set(xPos + W, 0, 0);
+    group.add(right);
+
+    // Lens fill
+    const lens = new THREE.Mesh(new THREE.PlaneGeometry(W * 2 - T, H * 2 - T), glas);
+    lens.position.set(xPos, 0, 0.01);
+    group.add(lens);
+
+    // Wayfarer — classic brow bar on top outer corners (trapezoidal nod)
+    const brow = new THREE.Mesh(new THREE.BoxGeometry(W * 2 + T * 1.6, T * 1.2, T), dark);
+    brow.position.set(xPos, H + T, 0);
+    group.add(brow);
+  }
+
+  // Bridge — wide block style
+  const bridge = new THREE.Mesh(new THREE.BoxGeometry(0.12, T, T), dark);
+  bridge.position.set(0, 0, 0);
+  group.add(bridge);
+
+  // Arms — thick acetate
+  for (const side of [-1, 1]) {
+    const arm = new THREE.Mesh(new THREE.BoxGeometry(0.70, T * 0.9, T * 0.8), dark);
+    arm.position.set(side * (SEP / 2 + W + 0.34), 0, -0.06);
+    arm.rotation.y = side * -0.12;
+    group.add(arm);
+  }
+
+  return group;
+}
+
+// ── Main ──────────────────────────────────────────────────────────────────────
+btn.addEventListener('click', async () => {
+  btn.disabled = true;
+  log.innerHTML = '';
+  addLog('🔧 Generating glasses_02.glb — Round Wire Frames…');
+
+  const models = [
+    { fn: makeRoundWireframes, file: 'glasses_02.glb', label: 'Round Wire Frames' },
+    { fn: makeAviators,        file: 'glasses_03.glb', label: 'Gold Aviators'     },
+    { fn: makeWayfarer,        file: 'glasses_04.glb', label: 'Wayfarer Black'    },
+  ];
+
+  for (const m of models) {
+    try {
+      const scene = new THREE.Scene();
+      scene.add(m.fn());
+      await exportGLB(scene, m.file);
+      addLog(`✅ ${m.file} — ${m.label} downloaded!`);
+      await new Promise(r => setTimeout(r, 600));  // stagger downloads
+    } catch (err) {
+      addLog(`❌ ${m.file} failed: ${err.message}`, false);
+    }
+  }
+
+  addLog('');
+  addLog('📁 Next: Move downloaded files to:');
+  addLog('   zyro-web/assets/models/glasses/');
+  addLog('');
+  addLog('🔄 Then reload http://localhost:8080 — new models will appear in catalogue!');
+  btn.disabled = false;
+  btn.textContent = '✅ Done — check downloads folder';
+});
+  </script>
+</body>
+</html>
