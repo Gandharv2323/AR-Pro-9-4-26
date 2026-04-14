@@ -1,0 +1,20 @@
+{
+  "version": "1.0",
+  "glasses": [
+    {"id": "g01", "file": "glasses_01.png", "label": "Classic Oval"},
+    {"id": "g02", "file": "glasses_02.png", "label": "Round Retro"},
+    {"id": "g03", "file": "glasses_03.png", "label": "Aviator"},
+    {"id": "g04", "file": "glasses_04.png", "label": "Wayfarer"},
+    {"id": "g05", "file": "glasses_05.png", "label": "Wire Frame"}
+  ],
+  "shirts": [
+    {"id": "s01", "file": "shirt_01.png", "label": "White Tee"},
+    {"id": "s02", "file": "shirt_02.png", "label": "Navy Polo"},
+    {"id": "s03", "file": "shirt_03.png", "label": "Black Hoodie"}
+  ],
+  "accessories": [
+    {"id": "a01", "file": "earrings_01.png", "label": "Gold Hoops"},
+    {"id": "a02", "file": "earrings_02.png", "label": "Silver Drops"},
+    {"id": "a03", "file": "earrings_03.png", "label": "Pearl Studs"}
+  ]
+}
